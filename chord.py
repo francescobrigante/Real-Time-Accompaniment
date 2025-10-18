@@ -5,9 +5,6 @@
 from mido import Message
 from typing import List
 
-#custom files
-from utils import save_chords_to_midi, play_chord_sequence_live
-
 # Static data
 # Maps notes to MIDI numbers
 NOTE_TO_MIDI_MAP = {
@@ -40,7 +37,7 @@ INTERVALS_MAP = {
 
 
 class Chord:
-    def __init__(self, root: str, chord_type: str = 'major', bpm: int = 120, duration_beats: float = 4.0, velocity: int = 80, channel: int = 0):
+    def __init__(self, root: str, chord_type: str = 'major', bpm: int = 120, beats_per_chord: float = 4.0, velocity: int = 80, channel: int = 0):
         """
         Chord class
         
@@ -48,20 +45,20 @@ class Chord:
             root: Root note ('C', 'F#', Bb, ...)
             chord_type: Chord type ('major', 'minor', '7', etc.)
             bpm: Beats per minute
-            duration_beats: Duration in beats (4.0 = one bar in 4/4)
+            beats_per_chord: Duration in beats (4.0 = one bar in 4/4)
             velocity: MIDI velocity (0-127)
             channel: MIDI channel (0-15)
         """
         self.root = root
         self.chord_type = chord_type
         self.bpm = bpm
-        self.duration_beats = duration_beats
+        self.beats_per_chord = beats_per_chord
         self.velocity = velocity
         self.channel = channel
         
         # Timing calculations
         self.beat_duration = 60.0 / self.bpm
-        self.duration_seconds = self.duration_beats * self.beat_duration
+        self.duration_seconds = self.beats_per_chord * self.beat_duration
         
         # Generate MIDI notes
         self.midi_notes = self._generate_midi_notes()
@@ -96,16 +93,18 @@ class Chord:
     def update_timing(self, new_bpm: int):
         self.bpm = new_bpm
         self.beat_duration = 60.0 / new_bpm
-        self.duration_seconds = self.duration_beats * self.beat_duration
+        self.duration_seconds = self.beats_per_chord * self.beat_duration
         # Regenerate MIDI events with new timing
         self.midi_messages = self._generate_midi_messages()
     
     def __str__(self):
-        return f"{self.root}{self.chord_type} ({self.duration_beats} beats @ {self.bpm} BPM)"
+        return f"{self.root}{self.chord_type} ({self.beats_per_chord} beats @ {self.bpm} BPM)"
     
     
 # Testing audio playback   
 if __name__ == '__main__':
+    from utils import save_chords_to_midi, play_chord_sequence_live
+    
     bpm = 80
     progression = [
         Chord('A', bpm=bpm), 
