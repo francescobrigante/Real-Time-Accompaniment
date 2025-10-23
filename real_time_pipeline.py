@@ -16,16 +16,18 @@ from collections import deque
 # custom modules
 from chord import Chord
 from harmony_rules import HarmonyRules
-from utils import play_chord, chord_to_roman, play_chord_sequence
+from utils import play_chord, chord_to_roman
+from midi_listener import MidiInputListener
 
-OUTPUT_PORT = 'Driver IAC Bus 1'
+OUTPUT_PORT = 'IAC Piano IN'
+INPUT_PORT = 'IAC Piano OUT'
 DELAY_START_SECONDS = 2.0  # Delay before starting the first chord
 
 
 class RealTimePipeline:
     
-    def __init__(self, key: str = 'C', chord_type: str = 'major', bpm: int = 120, beats_per_chord: float = 4.0, 
-                 window_size: int = 4, max_sequence_length: int = 10, output_port: str = OUTPUT_PORT):
+    def __init__(self, key: str = 'C', chord_type: str = 'major', bpm: int = 120, beats_per_chord: float = 4.0, window_size: int = 4, 
+                 max_sequence_length: int = 10, output_port: str = OUTPUT_PORT, input_port: Optional[str] = None, enable_input_listener: bool = False):
         
         # Internal configuration
         self.key = key
@@ -34,7 +36,15 @@ class RealTimePipeline:
         self.chord_duration_seconds = (beats_per_chord * 60.0) / bpm
         self.window_size = window_size                                          # number of previous chords to consider for prediction
         self.max_sequence_length = max_sequence_length                          # maximum number of chords to generate
-        self.output_port = output_port                                          # MIDI output port name
+        self.output_port = output_port                                          # MIDI output port name: sends MIDI event for playback
+        self.input_port = input_port                                            # MIDI input port name: receives MIDI events for real-time input
+        self.enable_input_listener = enable_input_listener                      # Flag to enable MIDI input listener
+        
+        # MIDI Input listener
+        if self.enable_input_listener and self.input_port:
+            self.midi_listener = MidiInputListener(port_name=self.input_port, window_size=8, bpm=self.bpm)
+        else:
+            self.midi_listener = None
         
         # Harmony rules engine for prediction
         self.harmony = HarmonyRules(key)
@@ -58,6 +68,12 @@ class RealTimePipeline:
 
         if len(self.chord_window) == 0:
             return None
+        
+        # Get last played notes from listener if available
+        if self.midi_listener:
+            note_window = self.midi_listener.get_note_window()
+            # TODO: implement logic to influence prediction based on recent notes
+            print(f"[DEBUG] Recent played notes (MIDI number, duration in beats): {note_window}")
         
         # Predict next chord using harmony rules
         chord_tuple, _ = self.harmony.get_next_chord_distribution(self.chord_window)
@@ -171,6 +187,17 @@ class RealTimePipeline:
         print(f"[INFO] Starting real-time pipeline in key {self.key} @ {self.bpm} BPM")
         print(f"[INFO] Chord duration: {self.chord_duration_seconds:.1f}s ({self.beats_per_chord} beats)")
         print(f"[INFO] Will generate {self.max_sequence_length} chords total")
+        
+        
+        #TODO: add delay in listener as well?
+        # Start MIDI listener if enabled
+        if self.midi_listener:
+            print(f"[INFO] Starting MIDI input listener on port: {self.input_port}")
+            self.midi_listener.start()
+            # time.sleep(0.2)  # Give listener time to initialize
+        
+        
+        # Waiting mechanism implemented in timing thread
         print(f"[INFO] Waiting {DELAY_START_SECONDS} seconds before starting...\n")
 
         self.is_running = True
@@ -183,9 +210,27 @@ class RealTimePipeline:
         playback_thread = threading.Thread(target=self._playback_thread, daemon=True)
         playback_thread.start()
         
-        # Wait for completion
-        timing_thread.join()
-        playback_thread.join()
+        try:
+            # Wait for completion
+            timing_thread.join()
+            playback_thread.join()
+            
+        except KeyboardInterrupt as e:
+            
+            print(f"[\n\nWARNING] KeyboardInterrupt occurred, stopping pipeline: {e}")
+            self.stop() 
+            # Give threads time to clean up
+            print("[INFO] Waiting for threads to finish...\n\n")
+            timing_thread.join(timeout=2.0)
+            playback_thread.join(timeout=2.0)
+            
+        finally:
+            
+            # Stopping MIDI listener if running after other threads finish
+            if self.midi_listener:
+                print("[INFO] Stopping MIDI input listener...")
+                self.midi_listener.stop()
+                self.midi_listener.join(timeout=1.0)
         
         return self.chord_objects
     
@@ -193,6 +238,9 @@ class RealTimePipeline:
     # Stops the pipeline
     def stop(self):
         self.is_running = False
+        
+        if self.midi_listener:
+            self.midi_listener.stop()
     
     
     
@@ -224,9 +272,8 @@ if __name__ == "__main__":
     BEATS_PER_CHORD = 4.0
     
     try:
-        pipeline = RealTimePipeline(key=KEY, bpm=BPM, beats_per_chord=BEATS_PER_CHORD, 
-                                   window_size=4, max_sequence_length=8, 
-                                   output_port=OUTPUT_PORT)
+        pipeline = RealTimePipeline(key=KEY, bpm=BPM, beats_per_chord=BEATS_PER_CHORD, window_size=4, max_sequence_length=8, 
+                                   output_port=OUTPUT_PORT, input_port=INPUT_PORT, enable_input_listener=True)
     except:
         print("Warning: No MIDI port found")
         exit(1)
