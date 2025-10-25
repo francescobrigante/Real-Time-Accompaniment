@@ -8,27 +8,75 @@ CHROMATIC_NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', '
 MAJOR_SCALE_INTERVALS = [0, 2, 4, 5, 7, 9, 11]  # W-W-H-W-W-W-H
 CHORD_QUALITIES = ['major', 'minor', 'minor', 'major', 'major', 'minor', 'dim']
 ROMAN_NUMERALS = ['I', 'ii', 'iii', 'IV', 'V', 'vi', 'vii°']
+
+# Extended mapping with borrowed chords and modal interchange
+# Format: roman_numeral -> (scale_degree_index, quality)
+ROMAN_TO_CHORD_MAP = {
+    # Natural major scale degrees
+    'I': (0, 'major'),
+    'ii': (1, 'minor'),
+    'iii': (2, 'minor'),
+    'IV': (3, 'major'),
+    'V': (4, 'major'),
+    'vi': (5, 'minor'),
+    'vii°': (6, 'dim'),
+    # Borrowed chords (modal interchange from parallel minor)
+    'i': (0, 'minor'),      # i minor (tonic minor)
+    'II': (1, 'major'),     # II major (Neapolitan or Lydian)
+    'III': (2, 'major'),    # III major (borrowed from minor)
+    'iv': (3, 'minor'),     # iv minor (subdominant minor)
+    'v': (4, 'minor'),      # v minor (minor dominant)
+    'VI': (5, 'major'),     # VI major (borrowed from minor)
+    'VII': (6, 'major')     # VII major (borrowed from minor)
+}
+
+# Legacy mapping for backward compatibility
 ROMAN_TO_INDEX = { 'I': 0, 'ii': 1, 'iii': 2, 'IV': 3, 'V': 4, 'vi': 5, 'vii°': 6}
 
 
 # ================================= Chord Handling Utilities =======================================
 
-# Converts a roman numeral to (root_note, chord_type) given a MAJOR tonic key as string TODO: support minor keys, 7, etc. with harmonizer
+# Converts a roman numeral to (root_note, chord_type) given a MAJOR tonic key as string
 def roman_to_chord(tonic: str, roman_numeral: str) -> tuple:
-
-    if roman_numeral not in ROMAN_TO_INDEX:
+    """
+    Converts roman numeral chord notation to (root, chord_type) tuple.
+    Supports natural major scale degrees and borrowed chords (modal interchange).
+    
+    Args:
+        tonic: Key tonic (e.g., 'C', 'A', 'F#')
+        roman_numeral: Roman numeral (e.g., 'I', 'ii', 'IV', 'iv', 'II', etc.)
+        
+    Returns:
+        (root_note, chord_type) tuple (e.g., ('F', 'major'), ('D', 'minor'))
+        
+    Examples:
+        roman_to_chord('C', 'I') -> ('C', 'major')
+        roman_to_chord('C', 'ii') -> ('D', 'minor')
+        roman_to_chord('C', 'IV') -> ('F', 'major')
+        roman_to_chord('C', 'iv') -> ('F', 'minor')  # borrowed chord
+        roman_to_chord('C', 'II') -> ('D', 'major')  # borrowed chord
+    """
+    
+    # Check if roman numeral is recognized
+    if roman_numeral not in ROMAN_TO_CHORD_MAP:
+        print(f"[WARNING] roman_to_chord: Unrecognized roman numeral '{roman_numeral}'. Falling back to tonic ({tonic} major).")
         return (tonic, 'major')  # Fallback to tonic
-        
-    # Direct array access using index
-    degree_index = ROMAN_TO_INDEX[roman_numeral]
+    
+    # Get scale degree and quality from extended map
+    degree_index, chord_quality = ROMAN_TO_CHORD_MAP[roman_numeral]
     interval = MAJOR_SCALE_INTERVALS[degree_index]
-    chord_quality = CHORD_QUALITIES[degree_index]
-        
-    # Calculate note index with key offset
-    tonic_index = CHROMATIC_NOTES.index(tonic)
+    
+    # Calculate root note with key offset
+    try:
+        tonic_index = CHROMATIC_NOTES.index(tonic)
+    except ValueError:
+        print(f"[WARNING] roman_to_chord: Unrecognized tonic key '{tonic}'. Falling back to C major.")
+        tonic = 'C'
+        tonic_index = 0
+    
     note_index = (tonic_index + interval) % 12
     note_name = CHROMATIC_NOTES[note_index]
-        
+    
     return (note_name, chord_quality)
 
 # Converts a chord (root, chord_type) back to roman numeral given a tonic key
@@ -191,11 +239,9 @@ def play_chord_sequence(chord_sequence, output_port_name):
         print(f"[🎵PLAYING🎵] Playback finished on port: {output_port_name}")
 
 # Play a single chord live on MIDI output port with proper timing
+# Uses dynamic timing to ensure accurate playback
 def play_chord(chord, output_port_name):
-    """
-    Play a single chord with proper timing management.
-    Uses the same timing logic as play_chord_sequence for consistency.
-    """
+
     try:
         with mido.open_output(output_port_name) as outport:
             print(f"[🎵PLAYING🎵] Playing chord: {chord}")

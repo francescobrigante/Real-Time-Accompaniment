@@ -7,27 +7,46 @@
 #   - Playback thread: plays chords by reading from the scheduled list at the right time
 # ==================================================================================================================
 
+# TODO
+# migliorare pipeline predizione da accordi
+# implementare basic predizione con note:
+    # collegare distribuzione accordi alla distribuzione note per predizione finale
+    
+# TODO gestire caso in cui input delle note viene missato perchè una nota è premuta ma non rilasciata a fine accordo
 
 import time
 import threading
 from typing import List, Optional
 from collections import deque
+import mido
 
 # custom modules
 from chord import Chord
 from harmony_rules import HarmonyRules
+from notes_harmony_rules import NotesHarmonyRules
 from utils import play_chord, chord_to_roman
 from midi_listener import MidiInputListener
 
 OUTPUT_PORT = 'IAC Piano IN'
-INPUT_PORT = 'IAC Piano OUT'
-DELAY_START_SECONDS = 2.0  # Delay before starting the first chord
+INPUT_PORT = 'IAC Piano OUT' # vmpk virtual piano
+INPUT_PORT = 'Digital Piano' # yamaha physical keyboard
 
+# Delay configuration
+DELAY_START_SECONDS = 2.0  # Fixed delay when metronome is disabled
+
+# Metronome configuration
+METRONOME_NOTE = 76  # MIDI note for high wood block
+METRONOME_VELOCITY = 100
+METRONOME_DURATION = 0.05  # Short click duration in seconds
+EMPTY_BARS_COUNT = 1  # Number of empty bars with metronome before starting chords
+
+
+# ================================= Main Pipeline Class =======================================
 
 class RealTimePipeline:
     
     def __init__(self, key: str = 'C', chord_type: str = 'major', bpm: int = 120, beats_per_chord: float = 4.0, window_size: int = 4, 
-                 max_sequence_length: int = 10, output_port: str = OUTPUT_PORT, input_port: Optional[str] = None, enable_input_listener: bool = False):
+                 max_sequence_length: int = 10, output_port: str = OUTPUT_PORT, input_port: Optional[str] = None, enable_input_listener: bool = False, enable_metronome: bool = True, empty_bars_count: int = EMPTY_BARS_COUNT):
         
         # Internal configuration
         self.key = key
@@ -39,6 +58,14 @@ class RealTimePipeline:
         self.output_port = output_port                                          # MIDI output port name: sends MIDI event for playback
         self.input_port = input_port                                            # MIDI input port name: receives MIDI events for real-time input
         self.enable_input_listener = enable_input_listener                      # Flag to enable MIDI input listener
+        self.enable_metronome = enable_metronome                                # Flag to enable metronome
+        self.empty_bars_count = empty_bars_count                                # Number of empty bars before chords start
+        
+        # Calculate delay: use dynamic bars if metronome enabled, else fixed delay
+        if self.enable_metronome:
+            self.delay_seconds = empty_bars_count * beats_per_chord * (60.0 / bpm)
+        else:
+            self.delay_seconds = DELAY_START_SECONDS
         
         # MIDI Input listener
         if self.enable_input_listener and self.input_port:
@@ -47,7 +74,8 @@ class RealTimePipeline:
             self.midi_listener = None
         
         # Harmony rules engine for prediction
-        self.harmony = HarmonyRules(key)
+        self.harmony = HarmonyRules(key)                                        # First pipeline: chord based
+        self.notes_harmony = NotesHarmonyRules(key)                             # Second pipeline: note based
         
         # Real-time state data
         self.chord_window = deque(maxlen=window_size)                           # window of last window_size chords as roman numerals
@@ -64,45 +92,58 @@ class RealTimePipeline:
     
     
     # Core prediction logic - called when we need next chord
-    def _predict_and_schedule_next(self):
+    def _predict_next_chord(self):
 
         if len(self.chord_window) == 0:
             return None
         
-        # Get last played notes from listener if available
-        if self.midi_listener:
-            note_window = self.midi_listener.get_note_window()
-            # TODO: implement logic to influence prediction based on recent notes
-            print(f"[DEBUG] Recent played notes (MIDI number, duration in beats): {note_window}")
-        
         # Predict next chord using harmony rules
         chord_tuple, _ = self.harmony.get_next_chord_distribution(self.chord_window)
         if chord_tuple is None:
-            print("[DEBUG] Warning: Prediction returned None, using fallback C major")
-            chord_tuple = ('C', 'major')
+            # Fallback to tonic chord in current key
+            print(f"[DEBUG] Warning: Prediction returned None, using fallback to tonic ({self.key} major)")
+            chord_tuple = (self.key, 'major')
 
         # Convert to Chord object
         root, chord_type = chord_tuple
         next_chord = Chord(root, chord_type, self.bpm, self.beats_per_chord)
         
-        # Add to sequence for playback
-        self.chord_objects.append(next_chord)
-        # next_roman = self._chord_string_to_roman(next_chord_string)
-        next_roman = chord_to_roman(self.key, root, chord_type)
-        # Update chord window adding roman chord
-        self.chord_window.append(next_roman)
-        
         return next_chord
     
-    
-    
+    # TODO: add probability distribution output input
+    def _refine_prediction(self, scheduled_chord: Chord) -> Chord:
+        
+        if not self.midi_listener:
+            return scheduled_chord
+        
+        # Get last played notes from listener
+        note_window = self.midi_listener.get_note_window()
+        
+        # No notes played
+        if not note_window:
+            return None
+        
+        predicted_chord_tuple, _, _, _ = self.notes_harmony.predict_with_scores(note_window)
+        
+        if predicted_chord_tuple is None:
+            return None
+        
+        # Create new Chord object from prediction
+        root, chord_type = predicted_chord_tuple
+        predicted_chord = Chord(root, chord_type, self.bpm, self.beats_per_chord)
+        
+        print(f"[INFO] CHORD PREDICTION: {scheduled_chord} -> NOTE PREDICTION: {predicted_chord}")
+        
+        return predicted_chord
+
+
     # Real time thread: it predicts and schedules chords for playback
     def _timing_thread(self):
 
         self.start_time = time.time()
         
-        # ADD START DELAY HERE
-        time.sleep(DELAY_START_SECONDS)
+        # Wait for empty bars with metronome
+        time.sleep(self.delay_seconds)
 
         # Play starting chord by adding it to sequence and add to window
         self.chord_objects.append(self.starting_chord)
@@ -112,9 +153,9 @@ class RealTimePipeline:
         print(f"\n[{time.time() - self.start_time:.1f}s] Scheduling chord 1: {self.starting_chord}")
         
         # Schedule following chords
-        while self.is_running and len(self.chord_objects) < self.max_sequence_length:
+        while self.is_running and self.current_chord_idx < self.max_sequence_length:
             # Calculate when next chord should start
-            next_chord_time = self.start_time + DELAY_START_SECONDS + (self.current_chord_idx * self.chord_duration_seconds)
+            next_chord_time = self.start_time + self.delay_seconds + (self.current_chord_idx * self.chord_duration_seconds)
             current_time = time.time()
             
             # Sleep until next chord time
@@ -122,14 +163,43 @@ class RealTimePipeline:
             if wait_time > 0:
                 time.sleep(wait_time)
             
-            # Predict and add next chord
-            next_chord = self._predict_and_schedule_next()
-            if next_chord:
-                self.current_chord_idx += 1
-                print(f"\n[{time.time() - self.start_time:.1f}s] Scheduling next chord {self.current_chord_idx}: {next_chord}")
-                print(f"\tWindow: {' -> '.join(list(self.chord_window))}")
-            else:
+            # CHORD PIPELINE Prediction
+            predicted_chord = self._predict_next_chord()
+            if not predicted_chord:
+                print("[DEBUG] No predicted chord, ending sequence")
                 break
+            
+            # NOTES PIPELINE Refinement (returns None if no notes played)
+            refined_chord = self._refine_prediction(predicted_chord)
+            
+            # If no notes played, skip prediction and wait for next beat
+            if not refined_chord:
+                print(f"[{time.time() - self.start_time:.1f}s] No notes played, waiting for input...")
+                self.current_chord_idx += 1
+                
+                # Clear window and continue timing
+                if self.midi_listener:
+                    self.midi_listener.clear_note_window()
+                continue
+            
+            # Notes were played - use refined chord
+            # TODO: combine both predictions
+            final_chord = refined_chord
+            
+            # Add final chord to sequence (used for playback)
+            self.chord_objects.append(final_chord)
+            
+            # Update window with final chord's roman numeral
+            final_roman = chord_to_roman(self.key, final_chord.root, final_chord.chord_type)
+            self.chord_window.append(final_roman)
+            
+            self.current_chord_idx += 1
+            print(f"\n[{time.time() - self.start_time:.1f}s] Final chord {self.current_chord_idx}: {final_chord}")
+            print(f"\tWindow: {' -> '.join(list(self.chord_window))}")
+            
+            # Clear note window after each prediction cycle
+            if self.midi_listener:
+                self.midi_listener.clear_note_window()
         
         print(f"[{time.time() - self.start_time:.1f}s] Sequence complete!")
         self.is_running = False
@@ -149,7 +219,7 @@ class RealTimePipeline:
                 
                 # Calculate timing for this chord
                 chord_idx = last_played_idx + 1
-                play_time = self.start_time + DELAY_START_SECONDS + (chord_idx * self.chord_duration_seconds)
+                play_time = self.start_time + self.delay_seconds + (chord_idx * self.chord_duration_seconds)
 
                 # Wait until it's time to play
                 current_time = time.time()
@@ -188,19 +258,31 @@ class RealTimePipeline:
         print(f"[INFO] Chord duration: {self.chord_duration_seconds:.1f}s ({self.beats_per_chord} beats)")
         print(f"[INFO] Will generate {self.max_sequence_length} chords total")
         
+        if self.enable_metronome:
+            print(f"[INFO] Metronome enabled at {self.bpm} BPM")
+            print(f"[INFO] Starting with {self.empty_bars_count} empty bar(s) of metronome ({self.delay_seconds:.1f}s)")
+        else:
+            print(f"[INFO] Waiting {self.delay_seconds:.1f}s before starting...")
         
-        #TODO: add delay in listener as well?
+
         # Start MIDI listener if enabled
         if self.midi_listener:
             print(f"[INFO] Starting MIDI input listener on port: {self.input_port}")
             self.midi_listener.start()
             # time.sleep(0.2)  # Give listener time to initialize
-        
-        
-        # Waiting mechanism implemented in timing thread
-        print(f"[INFO] Waiting {DELAY_START_SECONDS} seconds before starting...\n")
 
         self.is_running = True
+        
+        # Start metronome thread if enabled
+        if self.enable_metronome:
+            metro_thread = threading.Thread(
+                target=metronome_thread, 
+                args=(lambda: self.start_time, self.bpm, self.beats_per_chord, 
+                      self.max_sequence_length, self.output_port, lambda: self.is_running,
+                      self.empty_bars_count),
+                daemon=True
+            )
+            metro_thread.start()
         
         # Start timing thread: predicts and schedules chords
         timing_thread = threading.Thread(target=self._timing_thread, daemon=True)
@@ -261,6 +343,63 @@ class RealTimePipeline:
             compact_names.append(compact_name)
         
         return compact_names
+    
+# Plays metronome clicks on each beat
+def metronome_thread(start_time, bpm, beats_per_chord, max_sequence_length, output_port, is_running_flag, empty_bars_count):
+    
+    if not output_port:
+        return
+        
+    try:
+        outport = mido.open_output(output_port)
+    except Exception as e:
+        print(f"[DEBUG] Could not open metronome output port: {e}")
+        return
+    
+    beat_duration = 60.0 / bpm  # Duration of one beat in seconds
+    
+    # Wait for start time to be set from main thread
+    while start_time() is None and is_running_flag():
+        time.sleep(0.01)
+    
+    if not is_running_flag():
+        outport.close()
+        return
+    
+    # Get the actual start_time value by calling the lambda
+    start_time_value = start_time()
+    
+    # Calculate total beats: empty bars + chord sequence
+    delay_beats = int(empty_bars_count * beats_per_chord)
+    total_beats = delay_beats + int(max_sequence_length * beats_per_chord)
+    
+    beat_count = 0
+    while is_running_flag() and beat_count < total_beats:
+
+        # Calculate when the next beat should occur (timing starts immediately from start_time)
+        beat_time = start_time_value + (beat_count * beat_duration)
+        current_time = time.time()
+        
+        # Sleep until the next beat time
+        wait_time = beat_time - current_time
+        if wait_time > 0:
+            time.sleep(wait_time)
+        
+        # Accent to first beat of each measure
+        velocity = METRONOME_VELOCITY + 20 if beat_count % beats_per_chord == 0 else METRONOME_VELOCITY
+        
+        # Play click
+        try:
+            outport.send(mido.Message('note_on', note=METRONOME_NOTE, velocity=velocity))
+            time.sleep(METRONOME_DURATION)
+            outport.send(mido.Message('note_off', note=METRONOME_NOTE))
+            
+        except Exception as e:
+            print(f"[DEBUG] Metronome playback error: {e}")
+        
+        beat_count += 1
+    
+    outport.close()
 
 
 # ================================= Main test =======================================
@@ -268,12 +407,12 @@ class RealTimePipeline:
 if __name__ == "__main__":
     # Test the pipeline
     BPM = 120
-    KEY = 'A'
+    KEY = 'C'
     BEATS_PER_CHORD = 4.0
     
     try:
         pipeline = RealTimePipeline(key=KEY, bpm=BPM, beats_per_chord=BEATS_PER_CHORD, window_size=4, max_sequence_length=8, 
-                                   output_port=OUTPUT_PORT, input_port=INPUT_PORT, enable_input_listener=True)
+                                   output_port=OUTPUT_PORT, input_port=INPUT_PORT, enable_input_listener=True, enable_metronome=True)
     except:
         print("Warning: No MIDI port found")
         exit(1)
@@ -294,3 +433,5 @@ if __name__ == "__main__":
         print(f"Chord {i+1}: {chord_name} ({chord_obj.root} {chord_obj.chord_type})")
     
     print(f"\nTotal duration: {len(final_sequence) * pipeline.chord_duration_seconds:.1f} seconds")
+    
+    # battuta a vuoto metronomo

@@ -15,7 +15,11 @@ TRANSITION_RULES = {
     'IV': [('I', 0.3), ('V', 0.25), ('ii', 0.2), ('vi', 0.15), ('iii', 0.1)],
     'V': [('I', 0.5), ('vi', 0.3), ('IV', 0.15), ('ii', 0.05)],  # V -> I very strong
     'vi': [('IV', 0.35), ('ii', 0.25), ('V', 0.2), ('iii', 0.15), ('I', 0.05)],
-    'vii°': [('I', 0.7), ('iii', 0.2), ('V', 0.1)]
+    'vii°': [('I', 0.7), ('iii', 0.2), ('V', 0.1)],
+    # Additional chords
+    'II': [('V', 0.5), ('I', 0.3), ('vi', 0.2)],  # Secondary dominant or borrowed chord
+    'III': [('vi', 0.5), ('IV', 0.3), ('I', 0.2)],  # Often goes to vi
+    'iv': [('I', 0.5), ('V', 0.3), ('vii°', 0.2)]  # Minor subdominant (borrowed from parallel minor)
 }
 
 # TODO: what if we start with C7 or Cm?

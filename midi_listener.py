@@ -1,4 +1,8 @@
-
+# ==================================================================================================================
+# Thread-safe MIDI input listener that tracks the last N completed notes with durations, using a sliding window.
+# Only adds notes to window when they are released (note_on -> note_off).
+# Tracks beat position for synchronization with real-time pipeline.
+# ==================================================================================================================
 
 import mido
 import time
@@ -6,8 +10,8 @@ import threading
 from typing import Optional, List, Tuple, Dict
 from collections import deque
 
-# Static data
-NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+# Import shared constants from utils
+from utils import CHROMATIC_NOTES
 
 
 class MidiInputListener(threading.Thread):
@@ -123,13 +127,19 @@ class MidiInputListener(threading.Thread):
     # Converts MIDI note number to note name (e.g., 60 -> C4)
     def _get_note_name(self, midi_note: int) -> str:
 
-        note_name = NOTE_NAMES[midi_note % 12]
+        note_name = CHROMATIC_NOTES[midi_note % 12]
         octave = (midi_note // 12) - 1
         return f"{note_name}{octave}"
+    
+    # TODO: note to MIDI
 
     def get_note_window(self) -> List[Tuple[int, float]]:
         with self._lock:
             return list(self._note_window)  # Return copy
+        
+    def clear_note_window(self):
+        with self._lock:
+            self._note_window.clear()
     
     def get_beat_position(self) -> float:
         """
@@ -160,8 +170,11 @@ class MidiInputListener(threading.Thread):
 # ==================================== Main Test Block ============================================        
 
 if __name__ == "__main__":
+    
+    port = "IAC Piano OUT"
+    port = "Digital Piano"
 
-    listener = MidiInputListener("IAC Piano OUT", window_size=8, bpm=120)
+    listener = MidiInputListener(port, window_size=8, bpm=120)
     listener.start()
 
     print("🎹 Suona con VMPK! Press Ctrl+C to stop...\n")
