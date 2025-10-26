@@ -2,16 +2,15 @@
 
 A real-time intelligent accompaniment system that listens to your playing and generates harmonically appropriate chords.
 
+<div align="center">
+   
+### 🎥 Live Demo
 
-<!-- <div align="center">
-
-> ### 🎥 Live Demo
->
-> <img src="resources/realtime_example.gif" alt="Real-time chord accompaniment generation while soloist is playing some notes" width="750"/>
->
-</div> -->
+---
 
 ![Real-time chord accompaniment generation while soloist is playing some notes](resources/realtime_example.gif)
+
+</div> 
 
 
 > ## 🚧 Work in Progress!
