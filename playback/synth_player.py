@@ -15,7 +15,7 @@ from typing import Optional
 
 # Static data
 DEFAULT_SOUNDFONT = "playback/GeneralUser-GS.sf2" # Sounds used for synthesis
-DEFAULT_PROGRAM = 0  # Acoustic Grand Piano
+DEFAULT_PROGRAM = 0  # Acoustic Grand Piano, try 1 e 2
 DEFAULT_CHANNEL = 0
 DEFAULT_GAIN = 1.0  # Volume level
 
@@ -25,6 +25,8 @@ AUDIO_DRIVERS = {
     'linux': 'alsa',         # Linux
     'win32': 'dsound'        # Windows
 }
+
+#TODO: driver asio per windows pe prevenire latenza
 
 
 # ================================= Core Synth Player =======================================

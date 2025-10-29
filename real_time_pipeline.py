@@ -1,10 +1,12 @@
 # ==================================================================================================================
 # Real-Time Accompaniment Generation Pipeline
-# Based on 2 threads:
+# Based on different threads:
 #   - Timing thread: predicts and schedules chords
-#                    prediction is based on a sliding window of previous chords and HarmonyRules
+#                    Chord-based Prediction: based on a sliding window of previous chords and HarmonyRules
+#                    Note-based Refinement: based on recent played notes from MIDI input and NotesHarmonyRules
 #                    scheduled chords are stored in a list for playback that contains all chords as objects
 #   - Playback thread: plays chords by reading from the scheduled list at the right time
+#   - (Optional) Metronome thread: plays metronome clicks on each beat
 # ==================================================================================================================
 
 # TODO
@@ -18,7 +20,6 @@ import time
 import threading
 from typing import List, Optional
 from collections import deque
-import mido
 
 # custom modules
 from chord import Chord
@@ -26,19 +27,15 @@ from harmony_rules import HarmonyRules
 from notes_harmony_rules import NotesHarmonyRules
 from utils import play_chord, chord_to_roman
 from midi_listener import MidiInputListener
+from metronome import metronome_thread, EMPTY_BARS_COUNT
+from metronome import init_metronome, metronome_thread_synth
 
-OUTPUT_PORT = 'IAC Piano IN'
-INPUT_PORT = 'IAC Piano OUT' # vmpk virtual piano
-INPUT_PORT = 'Digital Piano' # yamaha physical keyboard
+OUTPUT_PORT = 'IAC Piano IN' # vmpk virtual piano for playback
+INPUT_PORT = 'IAC Piano OUT' # vmpk virtual piano for notes input
+# INPUT_PORT = 'Digital Piano' # yamaha physical keyboard
 
 # Delay configuration
 DELAY_START_SECONDS = 2.0  # Fixed delay when metronome is disabled
-
-# Metronome configuration
-METRONOME_NOTE = 76  # MIDI note for high wood block
-METRONOME_VELOCITY = 100
-METRONOME_DURATION = 0.05  # Short click duration in seconds
-EMPTY_BARS_COUNT = 1  # Number of empty bars with metronome before starting chords
 
 
 # ================================= Main Pipeline Class =======================================
@@ -87,6 +84,8 @@ class RealTimePipeline:
         # Pre-generate starting chord with correct duration
         self.starting_chord = Chord(key, chord_type, bpm, beats_per_chord)
         
+        # NEW
+        self.metronome_synth = init_metronome()
         
     # ================================= Main thread functions =======================================
     
@@ -274,12 +273,25 @@ class RealTimePipeline:
         self.is_running = True
         
         # Start metronome thread if enabled
+        # if self.enable_metronome:
+        #     metro_thread = threading.Thread(
+        #         target=metronome_thread, 
+        #         args=(lambda: self.start_time, self.bpm, self.beats_per_chord, 
+        #               self.max_sequence_length, self.output_port, 
+        #               lambda: self.is_running, self.empty_bars_count),
+        #         daemon=True
+        #     )
+        #     metro_thread.start()
+            
+            
+        # NEW
         if self.enable_metronome:
             metro_thread = threading.Thread(
-                target=metronome_thread, 
+                target=metronome_thread_synth, 
                 args=(lambda: self.start_time, self.bpm, self.beats_per_chord, 
-                      self.max_sequence_length, self.output_port, lambda: self.is_running,
-                      self.empty_bars_count),
+                      self.max_sequence_length,
+                      self.metronome_synth,
+                      lambda: self.is_running, self.empty_bars_count),
                 daemon=True
             )
             metro_thread.start()
@@ -313,6 +325,11 @@ class RealTimePipeline:
                 print("[INFO] Stopping MIDI input listener...")
                 self.midi_listener.stop()
                 self.midi_listener.join(timeout=1.0)
+                
+            # NEW
+            if self.metronome_synth:
+                self.metronome_synth.delete()
+                self.metronome_synth = None
         
         return self.chord_objects
     
@@ -323,6 +340,11 @@ class RealTimePipeline:
         
         if self.midi_listener:
             self.midi_listener.stop()
+            
+        # NEW
+        if self.metronome_synth:
+            self.metronome_synth.delete()
+            self.metronome_synth = None
     
     
     
@@ -343,64 +365,6 @@ class RealTimePipeline:
             compact_names.append(compact_name)
         
         return compact_names
-    
-# Plays metronome clicks on each beat
-def metronome_thread(start_time, bpm, beats_per_chord, max_sequence_length, output_port, is_running_flag, empty_bars_count):
-    
-    if not output_port:
-        return
-        
-    try:
-        outport = mido.open_output(output_port)
-    except Exception as e:
-        print(f"[DEBUG] Could not open metronome output port: {e}")
-        return
-    
-    beat_duration = 60.0 / bpm  # Duration of one beat in seconds
-    
-    # Wait for start time to be set from main thread
-    while start_time() is None and is_running_flag():
-        time.sleep(0.01)
-    
-    if not is_running_flag():
-        outport.close()
-        return
-    
-    # Get the actual start_time value by calling the lambda
-    start_time_value = start_time()
-    
-    # Calculate total beats: empty bars + chord sequence
-    delay_beats = int(empty_bars_count * beats_per_chord)
-    total_beats = delay_beats + int(max_sequence_length * beats_per_chord)
-    
-    beat_count = 0
-    while is_running_flag() and beat_count < total_beats:
-
-        # Calculate when the next beat should occur (timing starts immediately from start_time)
-        beat_time = start_time_value + (beat_count * beat_duration)
-        current_time = time.time()
-        
-        # Sleep until the next beat time
-        wait_time = beat_time - current_time
-        if wait_time > 0:
-            time.sleep(wait_time)
-        
-        # Accent to first beat of each measure
-        velocity = METRONOME_VELOCITY + 20 if beat_count % beats_per_chord == 0 else METRONOME_VELOCITY
-        
-        # Play click
-        try:
-            outport.send(mido.Message('note_on', note=METRONOME_NOTE, velocity=velocity))
-            time.sleep(METRONOME_DURATION)
-            outport.send(mido.Message('note_off', note=METRONOME_NOTE))
-            
-        except Exception as e:
-            print(f"[DEBUG] Metronome playback error: {e}")
-        
-        beat_count += 1
-    
-    outport.close()
-
 
 # ================================= Main test =======================================
 
@@ -409,9 +373,10 @@ if __name__ == "__main__":
     BPM = 120
     KEY = 'C'
     BEATS_PER_CHORD = 4.0
+    SEQUENCE_LENGTH = 10
     
     try:
-        pipeline = RealTimePipeline(key=KEY, bpm=BPM, beats_per_chord=BEATS_PER_CHORD, window_size=4, max_sequence_length=8, 
+        pipeline = RealTimePipeline(key=KEY, bpm=BPM, beats_per_chord=BEATS_PER_CHORD, window_size=4, max_sequence_length=SEQUENCE_LENGTH, 
                                    output_port=OUTPUT_PORT, input_port=INPUT_PORT, enable_input_listener=True, enable_metronome=True)
     except:
         print("Warning: No MIDI port found")
